@@ -145,6 +145,7 @@ class RosInterface:
             self.enable = False
             self.available_tag = False
             self.emergency_state = 1
+            self.freeze_update = False
 
             rospy.Service(self.node_name + '/get_id', Marker, self.get_id_srv)
             rospy.Service(self.node_name + '/init_pose', Trigger, self.reset_odom_srv)
@@ -288,6 +289,7 @@ class RosInterface:
                 rospy.sleep(0.01)
 
         def prepare_position(self, current_pose):
+            self.freeze_update = True
             x,y,yaw = current_pose
             if y > 0:
                 target_rotate = self.state.yaw + -yaw - np.pi/2
@@ -298,6 +300,7 @@ class RosInterface:
             self.move_forward(y)
             rospy.sleep(0.1)
             self.rotate(self.state.yaw + np.pi/2 * np.sign(y))
+            self.freeze_update = False
             
 
 
@@ -349,8 +352,8 @@ class RosInterface:
         def loop(self):
             while not rospy.is_shutdown():
                 updated = False
-                if self.rgb_msg_front is None or not self.enable:
-                    rospy.sleep(0.5)
+                if self.rgb_msg_front is None or not self.enable or self.freeze_update:
+                    rospy.sleep(0.01)
                     continue
                 frame, stamp = self.rgb_msg_front
                 ## frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
