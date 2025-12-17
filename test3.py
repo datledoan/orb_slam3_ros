@@ -1,154 +1,81 @@
 #!/usr/bin/env python3
+import rospy
 import cv2
 import apriltag
-import numpy as np
-import yaml
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 
+class AprilTagOverlayNode:
+    def __init__(self):
+        rospy.init_node("apriltag_overlay_node")
 
-def load_camera_calib(path):
-    cv_file = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
-    K = cv_file.getNode("K").mat()
-    D = cv_file.getNode("D").mat()
-    cv_file.release()
+        self.bridge = CvBridge()
 
-    print("[INFO] Loaded K =\n", K)
-    print("[INFO] Loaded D =\n", D)
-
-    return K, D
-
-
-def apritag_pose_fisheye(corners, tag_size, K, D):
-    """
-    corners: (4,2) pixel coordinates (fisheye image)
-    """
-
-    # Define 3D tag corners in tag coordinate
-    obj_pts = np.array([
-        [-tag_size/2, -tag_size/2, 0],
-        [ tag_size/2, -tag_size/2, 0],
-        [ tag_size/2,  tag_size/2, 0],
-        [-tag_size/2,  tag_size/2, 0]
-    ], dtype=np.float32)
-
-    # Convert pixel -> normalized via fisheye model
-    pts = corners.reshape(-1, 1, 2).astype(np.float32)
-
-    undistorted = cv2.undistortPoints(pts, K, D, P=K)
-    undistorted = undistorted.reshape(-1, 2)
-
-    # SolvePnP with normalized non-distorted points
-    ok, rvec, tvec = cv2.solvePnP(
-        obj_pts,
-        undistorted,
-        K,
-        np.zeros(5)  # NO distortion here
-    )
-
-    if not ok:
-        return None, None, None
-
-    T = np.eye(4)
-    T[:3, :3] = cv2.Rodrigues(rvec)[0]
-    T[:3, 3] = tvec[:, 0]
-
-    return T, rvec, tvec
-
-def convert_pose_new_to_old(T_new):
-    """
-    Convert the fisheye pose (new) into the same coordinate convention
-    as the old undistorted AprilTag pipeline.
-    """
-    # Flip Y and Z axes to match old corner-flip convention
-    F = np.diag([1, -1, -1])  
-
-    R_new = T_new[:3, :3]
-    t_new = T_new[:3, 3]
-
-    R_old = R_new @ F
-
-    T_old = np.eye(4)
-    T_old[:3, :3] = R_old
-    T_old[:3, 3] = t_new
-
-    return T_old
-
-def main():
-    # -------------------------------------------------------
-    # 1. Load config
-    # -------------------------------------------------------
-    with open("fiducial_marker.yaml", "r") as f:
-        cfg = yaml.safe_load(f)
-
-    tag_size = cfg["tag_size"]
-    camera_coef_file = cfg["camera_coef_file"]
-
-    # -------------------------------------------------------
-    # 2. Load fisheye calibration
-    # -------------------------------------------------------
-    K, D = load_camera_calib(camera_coef_file)
-
-    # -------------------------------------------------------
-    # 3. Init AprilTag detector
-    # -------------------------------------------------------
-    options = apriltag.DetectorOptions(refine_pose=True)
-    detector = apriltag.Detector(options)
-
-    # -------------------------------------------------------
-    # 4. Load image
-    # -------------------------------------------------------
-    img_path = "debug.png"
-    print("[INFO] Reading:", img_path)
-
-    frame = cv2.imread(img_path)
-    if frame is None:
-        print("❌ Cannot read image!")
-        return
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # -------------------------------------------------------
-    # 5. Detect on fisheye image (NO undistort)
-    # -------------------------------------------------------
-    detections, dbg = detector.detect(gray, return_image=True)
-    print(f"[INFO] Found {len(detections)} tags")
-
-    overlay = frame.copy()
-    h, w = frame.shape[:2]
-
-    for det in detections:
-        tag_id = det.tag_id
-        center = det.center.astype(int)
-        corners = det.corners  # (4,2)
-
-        print(f" → Tag ID = {tag_id}, center = {center}")
-
-        # Estimate pose using fisheye model
-        T, rvec, tvec = apritag_pose_fisheye(corners, tag_size, K, D)
-        T = convert_pose_new_to_old(T)
-
-        if T is None:
-            print("❌ PnP failed!")
-            continue
-
-        print("[POSE]\n", T)
-
-        cv2.putText(
-            overlay, f"ID: {tag_id}",
-            (center[0], center[1]),
-            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2
+        # Subscriber
+        self.sub = rospy.Subscriber(
+            "/usb_cam_front",
+            Image,
+            self.image_callback,
+            queue_size=1
         )
 
-        for pt in corners.astype(int):
-            cv2.circle(overlay, tuple(pt), 4, (0, 255, 0), -1)
+        # Publisher
+        self.pub = rospy.Publisher(
+            "/usb_cam_front/apriltag_overlay",
+            Image,
+            queue_size=1
+        )
 
-    # -------------------------------------------------------
-    # 6. Display
-    # -------------------------------------------------------
-    cv2.imshow("Frame", frame)
-    cv2.imshow("Detections", overlay)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+        # AprilTag detector
+        self.detector = apriltag.Detector()
 
+        rospy.loginfo("AprilTag Overlay Node started")
+
+    def image_callback(self, msg):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as e:
+            rospy.logerr(e)
+            return
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Detect AprilTags
+        detections = self.detector.detect(gray)
+
+        for det in detections:
+            tag_id = det.tag_id
+            corners = det.corners.astype(int)
+            center = det.center.astype(int)
+
+            # Draw bounding box
+            for i in range(4):
+                pt1 = tuple(corners[i])
+                pt2 = tuple(corners[(i + 1) % 4])
+                cv2.line(frame, pt1, pt2, (0, 255, 0), 2)
+
+            # Draw center
+            cv2.circle(frame, tuple(center), 5, (0, 0, 255), -1)
+
+            # Put tag ID
+            cv2.putText(
+                frame,
+                f"ID: {tag_id}",
+                (center[0] - 20, center[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 0, 0),
+                2
+            )
+
+        # Publish overlay image
+        overlay_msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+        overlay_msg.header = msg.header
+        self.pub.publish(overlay_msg)
 
 if __name__ == "__main__":
-    main()
+    try:
+        AprilTagOverlayNode()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass
