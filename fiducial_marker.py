@@ -262,18 +262,21 @@ class RosInterface:
                     rospy.loginfo("[Fiducial marker]: Robot is too far destination, trying setup position")
                     self.prepare_position(res)
                 return TriggerResponse(message = msg, success=True)
-        
+
+        def norm_deg(self, angle):
+            norm_angle = (angle + 180) % 360 -180
+            return norm_angle        
+
         def correct_upper(self, target_rotate):
             if self.angle_upper is None:
                 rospy.logerr("[Fiducial marker]: cannot read table upper position")
                 return
             while not rospy.is_shutdown():
-                error = target_rotate - self.angle_upper
-				abs_error = -np.sign(error) * (abs(target_rotate) - abs(self.angle_upper))
-                if abs(abs_error) < 2:
+                error = self.norm_deg(target_rotate - self.angle_upper)
+                if abs(error) < 2:
                     self.set_speed_upper(0)
                     break
-                w = 50 * abs_error
+                w = 50 * error
                 w = np.clip(w, -100, 100)
                 self.set_speed_upper(w)
                 rospy.sleep(0.01)
@@ -305,14 +308,14 @@ class RosInterface:
 
             while not rospy.is_shutdown():
                 qr_yaw = target_rotate - self.state.yaw
-                lift_err = abs(target_lift) - abs(self.angle_upper)
+                lift_err = self.norm_deg(target_lift -self.angle_upper)
 
                 if self.emergency_state !=1 and self.emergency_state != 12:
                     rospy.loginfo(f"[fiducial_marker]: Stop rotating Emergency state = {self.emergency_state}") 
                     break
 
                 if abs(qr_yaw) < controller_param['max_angle']:
-                    if abs(lift_err) < 3:
+                    if abs(lift_err) < 2:
                         self.set_speed_wheel(0, 0)
                         break
                     else:
@@ -332,18 +335,18 @@ class RosInterface:
         def prepare_position(self, current_pose):
             self.freeze_update = True
             x,y,yaw = current_pose
-			pre_ratio = 1
+            pre_ratio = 1
             if self.angle_upper is None:
                 rospy.logerr("[Fiducial marker]: cannot read table upper position")
                 return
             if y > 0:
                 target_rotate = self.state.yaw + -yaw - np.pi/2
                 target_lift = self.snap_deg(self.angle_upper + 90)
-				pre_ratio = abs(-yaw + np.pi/2) / abs(np.pi/2)
+                pre_ratio = abs(-yaw + np.pi/2) / abs(np.pi/2)
             else:
                 target_rotate =  self.state.yaw + -yaw + np.pi/2
                 target_lift = self.snap_deg(self.angle_upper - 90)
-				pre_ratio = abs(-yaw - np.pi/2) / abs(np.pi/2)
+                pre_ratio = abs(-yaw - np.pi/2) / abs(np.pi/2)
             self.rotate( target_lift, target_rotate, pre_ratio)
             rospy.sleep(0.1)
             self.move_forward(y)
@@ -440,10 +443,6 @@ class RosInterface:
 
                             self.update_odom_from_goal(tag_id, mat_cam_goal)
 
-                    
-                    
-                        
-
                 # cv2.imshow("aaa", overlay)
                 # cv2.waitKey(1)
                 self.state.pub_odom()
@@ -490,6 +489,3 @@ if __name__ == "__main__":
     rf = RosInterface()
     rf.loop()
     rospy.spin()
-
-    
-    
