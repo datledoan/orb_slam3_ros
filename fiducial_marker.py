@@ -33,7 +33,7 @@ from datetime import datetime
 
 from drop_pallet_server import smooth_velocity
 from cros_kinematics.msg import speed_wheel
-from std_msgs.msg import UInt8
+from std_msgs.msg import UInt8, Int32
 
 
 def pub_tf(pose, frame_cam = "carter_camera_stereo_right", id=0):
@@ -146,6 +146,7 @@ class RosInterface:
             self.available_tag = False
             self.emergency_state = 1
             self.freeze_update = False
+            self.angle_upper = None
 
             rospy.Service(self.node_name + '/get_id', Marker, self.get_id_srv)
             rospy.Service(self.node_name + '/init_pose', Trigger, self.reset_odom_srv)
@@ -153,6 +154,7 @@ class RosInterface:
             rospy.Subscriber('odom', Odometry, self.odom_callback, queue_size=1)
             rospy.Subscriber(self.topic_rgb_front, Image, self.callback_rgb_front)
             rospy.Subscriber("/fw_state", UInt8, self.emergency_cb) # check emergency state
+            rospy.Subscriber("/turntable/position", Int32, self.angle_upper_cb)
 
             self.aux_tag = 0
             self.in_action = False
@@ -160,7 +162,10 @@ class RosInterface:
             self.cmd_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
             self.pub_speed = rospy.Publisher('/wheel_speed_cmd', speed_wheel, queue_size=1)
             rospy.sleep(0.5)
-            self.mat_base_cam = self.get_mat_base_cam()  
+            self.mat_base_cam = self.get_mat_base_cam()
+
+        def angle_upper_cb(self, msg):
+            self.angle_upper = msg.data
 
         def emergency_cb(self, data):
             self.emergency_state = data.data         
@@ -226,12 +231,17 @@ class RosInterface:
             sp_upper  = int(-sp_w * controller_param['ratio_wheel_w_upper'])
             sp_pub = speed_wheel(sp_w, -sp_w, 0, sp_upper)
             self.pub_speed.publish(sp_pub)
+        
+        def set_speed_upper(self, vel):
+            sp_pub = speed_wheel(0, 0, 0, vel)
+            self.pub_speed.publish(sp_pub)
 
         def set_cmd_vel(self, vel_x, vel_yaw):
             twist = Twist()
             twist.linear.x = vel_x
             twist.angular.z = vel_yaw
             self.cmd_pub.publish(twist)
+
         def reset_odom_srv(self, req):
             self.aux_tag = 0
             self.in_action = False
@@ -252,6 +262,20 @@ class RosInterface:
                     rospy.loginfo("[Fiducial marker]: Robot is too far destination, trying setup position")
                     self.prepare_position(res)
                 return TriggerResponse(message = msg, success=True)
+        
+        def correct_upper(self, target_rotate):
+            if self.angle_upper is None:
+                rospy.logerr("[Fiducial marker]: cannot read table upper position")
+                return
+            while not rospy.is_shutdown():
+                error = target_rotate - self.angle_upper
+                if abs(error) < 2:
+                    self.set_speed_upper(0)
+                    break
+                w = 50 * error
+                w = np.clip(w, -100, 100)
+                self.set_speed_upper(w)
+                rospy.sleep(0.01)
 
         def move_forward(self, dis):
             v_ref = controller_param['v_ref']/2
@@ -271,39 +295,58 @@ class RosInterface:
                 self.set_cmd_vel(v, 0)
                 rospy.sleep(0.1)
 
-        def rotate(self, target_rotate):
+        def rotate(self, target_lift, target_rotate):
             # rospy.loginfo(f"[fiducial_marker]: Rotating target {target_rotate:.2f}, current: {self.state.yaw:.2f}") 
             w_ref = controller_param['w_ref']
+            if self.angle_upper is None:
+                rospy.logerr("[Fiducial marker]: cannot read table upper position")
+                return
 
             while not rospy.is_shutdown():
                 qr_yaw = target_rotate - self.state.yaw
+                lift_err = abs(target_lift) - abs(self.angle_upper)
+
                 if self.emergency_state !=1 and self.emergency_state != 12:
                     rospy.loginfo(f"[fiducial_marker]: Stop rotating Emergency state = {self.emergency_state}") 
                     break
+
                 if abs(qr_yaw) < controller_param['max_angle']:
-                    self.set_speed_wheel(0, 0)
-                    break
+                    if abs(lift_err) < 3:
+                        self.set_speed_wheel(0, 0)
+                        break
+                    else:
+                        self.set_speed_wheel(0, 0)
+                        self.correct_upper(target_lift)
+                        break
                 w = 2*w_ref * smooth_velocity(abs(qr_yaw), 2*np.pi/3) * np.sign(qr_yaw)
                 # print(qr_yaw, w)
                 self.set_speed_wheel(0, w)
                 rospy.sleep(0.01)
+        
+        def snap_deg(self, angle):
+            norm_angle = (angle + 180) % 360 -180
+            snap_angle = round(norm_angle / 90) * 90
+            return snap_angle
 
         def prepare_position(self, current_pose):
             self.freeze_update = True
             x,y,yaw = current_pose
+            if self.angle_upper is None:
+                rospy.logerr("[Fiducial marker]: cannot read table upper position")
+                return
             if y > 0:
                 target_rotate = self.state.yaw + -yaw - np.pi/2
+                target_lift = self.snap_deg(self.angle_upper + 90)
             else:
                 target_rotate =  self.state.yaw + -yaw + np.pi/2
-            self.rotate(target_rotate)
+                target_lift = self.snap_deg(self.angle_upper - 90)
+            self.rotate( target_lift, target_rotate)
             rospy.sleep(0.1)
             self.move_forward(y)
             rospy.sleep(0.1)
-            self.rotate(self.state.yaw + np.pi/2 * np.sign(y))
+            self.rotate(self.snap_deg(self.angle_upper - 90 * np.sign(y)), self.state.yaw + np.pi/2 * np.sign(y))
             self.freeze_update = False
             
-
-
         def odom_callback(self, data):
             linear = data.twist.twist.linear.x
             angular_z = data.twist.twist.angular.z
