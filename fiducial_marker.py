@@ -226,9 +226,9 @@ class RosInterface:
                 mat_base_cam = np.eye(4)
             return mat_base_cam
 
-        def set_speed_wheel(self, vel_x, vel_yaw):
+        def set_speed_wheel(self, pre_ratio, vel_yaw):
             sp_w = -int(vel_yaw * controller_param['ratio_rad_wheel'])
-            sp_upper  = int(-sp_w * controller_param['ratio_wheel_w_upper'])
+            sp_upper  = int(-sp_w * controller_param['ratio_wheel_w_upper'] * pre_ratio)
             sp_pub = speed_wheel(sp_w, -sp_w, 0, sp_upper)
             self.pub_speed.publish(sp_pub)
         
@@ -296,7 +296,7 @@ class RosInterface:
                 self.set_cmd_vel(v, 0)
                 rospy.sleep(0.1)
 
-        def rotate(self, target_lift, target_rotate):
+        def rotate(self, target_lift, target_rotate, pre_ratio):
             # rospy.loginfo(f"[fiducial_marker]: Rotating target {target_rotate:.2f}, current: {self.state.yaw:.2f}") 
             w_ref = controller_param['w_ref']
             if self.angle_upper is None:
@@ -321,7 +321,7 @@ class RosInterface:
                         break
                 w = 2*w_ref * smooth_velocity(abs(qr_yaw), 2*np.pi/3) * np.sign(qr_yaw)
                 # print(qr_yaw, w)
-                self.set_speed_wheel(0, w)
+                self.set_speed_wheel(pre_ratio, w)
                 rospy.sleep(0.01)
         
         def snap_deg(self, angle):
@@ -332,20 +332,23 @@ class RosInterface:
         def prepare_position(self, current_pose):
             self.freeze_update = True
             x,y,yaw = current_pose
+			pre_ratio = 1
             if self.angle_upper is None:
                 rospy.logerr("[Fiducial marker]: cannot read table upper position")
                 return
             if y > 0:
                 target_rotate = self.state.yaw + -yaw - np.pi/2
                 target_lift = self.snap_deg(self.angle_upper + 90)
+				pre_ratio = abs(-yaw + np.pi/2) / abs(np.pi/2)
             else:
                 target_rotate =  self.state.yaw + -yaw + np.pi/2
                 target_lift = self.snap_deg(self.angle_upper - 90)
-            self.rotate( target_lift, target_rotate)
+				pre_ratio = abs(-yaw - np.pi/2) / abs(np.pi/2)
+            self.rotate( target_lift, target_rotate, pre_ratio)
             rospy.sleep(0.1)
             self.move_forward(y)
             rospy.sleep(0.1)
-            self.rotate(self.snap_deg(self.angle_upper - 90 * np.sign(y)), self.state.yaw + np.pi/2 * np.sign(y))
+            self.rotate(self.snap_deg(self.angle_upper - 90 * np.sign(y)), self.state.yaw + np.pi/2 * np.sign(y), 1)
             self.freeze_update = False
             
         def odom_callback(self, data):
