@@ -269,7 +269,8 @@ class RosInterface:
                 return
             while not rospy.is_shutdown():
                 error = target_rotate - self.angle_upper
-                if abs(error) < 2:
+				abs_error = abs(target_rotate) - abs(self.angle_upper)
+                if abs(abs_error) < 2:
                     self.set_speed_upper(0)
                     break
                 w = 50 * error
