@@ -427,9 +427,8 @@ class RosInterface:
                         pose2,rvec,tvec = apritag_pose_fisheye(detection.corners[::-1], fiducial_marker_param['tag_size'], self.newcameramatrix, self.distortion_coefficients)
                         
                         # apriltag._draw_pose(overlay, camera_params, fiducial_marker_param['tag_size'], pose2)
-						if pose2[1, 3] < 0.1 or pose2[1, 3] > 0.3 or abs(pose2[0,3]) > 0.5:
+                        if pose2[1, 3] < 0.1 or pose2[1, 3] > 0.3 or abs(pose2[0,3]) > 0.5:
                             continue  # remove outlier
-							
                         if self.in_action and tag_id!= self.aux_tag and tag_id!=0:
                             continue
 
